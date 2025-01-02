@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <algorithm>
 
@@ -90,7 +91,6 @@ std::vector<int16_t> DecodeImaAdpcm(const std::vector<uint8_t>& ImaFileData, int
     return outBuff;
 }
 
-
 class WBK {
 public:
     struct wbk_header_t {
@@ -130,12 +130,26 @@ public:
 
     nslWave wave;
     wbk_header_t hdr;
+
     int num_channels = 0;
     int bits_per_sample = 0;
     int size = 0;
     int blockAlign = 0;
-    std::vector <int16_t> samples;
+    
     std::vector <nslWave> entries;
+    std::vector<std::vector<int16_t>> samples;
+
+    static int GetAudioChannels(const nslWave& wave) {
+        int num_channels = 0;
+        if (wave.flags)
+            num_channels = (((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) & 0x33)
+                + ((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) >> 2) & 0x33)) & 0xF)
+            + (((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) & 0x33)
+                + ((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) >> 2) & 0x33)) >> 4);
+        else
+            num_channels = 1;
+        return num_channels;
+    }
 
     int GetAudioBytesLen()
     {
@@ -168,90 +182,81 @@ public:
             stream.read(reinterpret_cast<char*>(&hdr), sizeof wbk_header_t);
             printf("Bank Name: %s\n", std::string(hdr.name).c_str());
 
-            stream.seekg(0x100, std::ios::beg);
-            stream.read(reinterpret_cast<char*>(&wave), sizeof nslWave);
-            printf("Length: %d\n", GetAudioBytesLen());
+            for (int index = 0; index < hdr.num_entries; ++index) {
+                
+                stream.seekg(0x100 + (index * sizeof nslWave), std::ios::beg);
+                stream.read(reinterpret_cast<char*>(&wave), sizeof nslWave);
+                
+                num_channels = GetAudioChannels(wave);
 
-            if (wave.flags)
-                num_channels = (((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) & 0x33)
-                    + ((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) >> 2) & 0x33)) & 0xF)
-                + (((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) & 0x33)
-                    + ((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) >> 2) & 0x33)) >> 4);
-            else
-                num_channels = 1;
+                // calc bits per sample & blockAlign
+                if (wave.format == 1 || wave.format == 2) {
+                    bits_per_sample = 8 * (wave.format != 1) + 8;
+                    blockAlign = (num_channels * bits_per_sample) / 8;
+                }
+                else if (wave.format == 4) {
+                    bits_per_sample = 16;
+                    blockAlign = (bits_per_sample * num_channels) / 8;
+                }
+                else if (wave.format == 5) {
+                    bits_per_sample = 4;
+                    blockAlign = 36 * num_channels;
+                }
+                else if (wave.format == 7) {
+                    bits_per_sample = 16;
+                    blockAlign = (bits_per_sample * num_channels) / 8;
+                    //auto avg_bytes_per_sec = wave.samples_per_second * (bits_per_sample * num_channels);
+                    //printf("avg_bytes_per_sec = %d\n", avg_bytes_per_sec);
+                }
 
-            // calc bits per sample & blockAlign
-            if (wave.format == 1 || wave.format == 2) {
-                bits_per_sample = 8 * (wave.format != 1) + 8;
-                blockAlign = (num_channels * bits_per_sample) / 8;
-            }
-            else if (wave.format == 4) {
-                bits_per_sample = 16;
-                blockAlign = (bits_per_sample * num_channels) / 8;
-            }
-            else if (wave.format == 5) {
-                bits_per_sample = 4;
-                blockAlign = 36 * num_channels;
-            }
-            else if (wave.format == 7) {
-                bits_per_sample = 16;
-                blockAlign = (bits_per_sample * num_channels) / 8;
-                //auto avg_bytes_per_sec = wave.samples_per_second * (bits_per_sample * num_channels);
-                //printf("avg_bytes_per_sec = %d\n", avg_bytes_per_sec);
-            }
-
-            // calc size depending on format
-            int fmt_type = wave.format - 4;
-            if (fmt_type) {
-                int tmp_type = fmt_type - 1;
-                if (!tmp_type)
-                    size = blockAlign * (wave.num_bytes >> 6);
-                else if (tmp_type != 2)
-                    size = wave.num_bytes;
+                // calc size depending on format
+                int fmt_type = wave.format - 4;
+                if (fmt_type) {
+                    int tmp_type = fmt_type - 1;
+                    if (!tmp_type)
+                        size = blockAlign * (wave.num_bytes >> 6);
+                    else if (tmp_type != 2)
+                        size = wave.num_bytes;
+                    else
+                        size = 4 * wave.num_samples;
+                }
                 else
-                    size = 4 * wave.num_samples;
-            }
-            else
-                size = 2 * wave.num_bytes;
+                    size = 2 * wave.num_bytes;
 
-
-            // PCM(?)
-            if (wave.format == 1 || wave.format == 2) {
-                stream.seekg(0x1000, std::ios::beg);
-                if (hdr.size) {
-                    for (int i = 0; i < hdr.size / 4; ++i) {
-                        int16_t sample1, sample2;
-                        stream.read(reinterpret_cast<char*>(&sample1), 2);
-                        stream.read(reinterpret_cast<char*>(&sample2), 2);
-                        samples.push_back(sample1);
-                        samples.push_back(sample2);
+                printf("Hash: 0x%08X Format=%d num_samples=%d num_channels=%d rate=%dHz len=%d bps=%d\n", wave.hash, wave.format, wave.num_samples, num_channels, wave.samples_per_second, GetAudioBytesLen(), bits_per_sample);
+                
+                // PCM(?)
+                if (wave.format == 1 || wave.format == 2) {
+                    stream.seekg(0x1000, std::ios::beg);
+                    if (hdr.size) {
+                        std::vector<int16_t> tmp;
+                        for (int i = 0; i < hdr.size / 4; ++i) {
+                            int16_t sample1, sample2;
+                            stream.read(reinterpret_cast<char*>(&sample1), 2);
+                            stream.read(reinterpret_cast<char*>(&sample2), 2);
+                            tmp.push_back(sample1);
+                            tmp.push_back(sample2);
+                        }
+                        samples.push_back(tmp);
                     }
                 }
-            }
-            // IMA ADPCM
-            else if (wave.format == 7)
-            {
-                std::vector<uint8_t> bdata;
-                stream.seekg(wave.compressed_data, std::ios::beg);
+                // IMA ADPCM
+                else if (wave.format == 7)
+                {
+                    std::vector<uint8_t> bdata;
+                    stream.seekg(wave.compressed_data, std::ios::beg);
+                    bdata.resize(size);
+                    stream.read((char*)bdata.data(), size);
+                    samples.push_back(DecodeImaAdpcm(bdata, wave.num_samples));
+                }
+                // @todo: codecs 5 (BINK) and 4 remaining
+                else
+                {
+                    printf("Unsupported codec (%d)!\n", wave.format);
+                }
 
-                auto totalBytes = hdr.total_bytes - 0x8000;
-                bdata.resize(totalBytes);
-                stream.read((char*)bdata.data(), totalBytes);
-                samples = DecodeImaAdpcm(bdata, wave.num_samples);
-            }
-            // @todo: codecs 5 (BINK) and 4 remaining
-            else 
-            {
-                printf("Unsupported codec (%d)!\n", wave.format);
-            }
-
-            // read descs
-            stream.seekg(0x100, std::ios::beg);
-            for (int index = 0; index < hdr.num_entries; ++index) {
-                nslWave tmp;
-                stream.read(reinterpret_cast<char*>(&tmp), sizeof nslWave);
-                printf("Hash: 0x%08X Format=%d num_samples=%d rate=%dHz\n", tmp.hash, tmp.format, tmp.num_samples, tmp.samples_per_second);
-                entries.push_back(tmp);
+                
+                entries.push_back(wave);
             }
             stream.close();
         }
@@ -304,7 +309,13 @@ int main(int argc, char** argv)
 
     WBK wbk;
     wbk.read(argv[1]);
-    if (wbk.samples.size()) 
-        writeWAV(argv[2], wbk.samples, wbk.wave.samples_per_second, wbk.num_channels);
+    
+    size_t index = 0;
+    for (auto& bank : wbk.samples) {
+        WBK::nslWave& entry = wbk.entries[index];
+        std::filesystem::path output_path = std::string(argv[2]).append(std::to_string(index)).append(".wav");
+        writeWAV(output_path.string(), bank, entry.samples_per_second, WBK::GetAudioChannels(entry));
+        ++index;
+    }
     return 1;
 }
