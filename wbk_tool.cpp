@@ -90,6 +90,13 @@ public:
         int num;
         int entry_desc_offs;
     } header;
+
+    struct metadata_t {
+        char codec;
+        char flags[3];
+        uint32_t unk_vals;
+        float unk_fvals[6];
+    };
     struct nslWave
     {
         int hash;
@@ -110,6 +117,7 @@ public:
 
     std::vector <nslWave> entries;
     std::vector<std::vector<int16_t>> tracks;
+    std::vector<metadata_t> metadata;
 
     static int GetNumChannels(const nslWave& wave) {
         int num_channels = 0;
@@ -151,8 +159,13 @@ public:
     {
         std::ifstream stream(path, std::ios::binary);
         if (stream.good()) {
+            stream.seekg(0, std::ios::end);
+            size_t actual_file_size = stream.tellg();
+            stream.seekg(0, std::ios::beg);
             stream.read(reinterpret_cast<char*>(&header), sizeof header_t);
             printf("Bank Name: %s\n", std::string(header.name).c_str());
+
+            // read all entries
 
             for (int index = 0; index < header.num_entries; ++index) {
                 nslWave entry;
@@ -194,6 +207,7 @@ public:
                 else
                     size = 2 * entry.num_bytes;
 
+
                 printf("Hash: 0x%08X codec=%d num_samples=%d num_channels=%d rate=%dHz bps=%d length=%fs\n", entry.hash, entry.codec, GetNumSamples(entry), GetNumChannels(entry), entry.samples_per_second, bits_per_sample, (float)GetNumSamples(entry) / entry.samples_per_second);
                 
                 // PCM(?)
@@ -214,8 +228,11 @@ public:
                 {
                     std::vector<uint8_t> bdata;
                     stream.seekg(entry.compressed_data_offs, std::ios::beg);
-                    bdata.resize(entry.num_bytes);
-                    stream.read((char*)bdata.data(), entry.num_bytes);
+                    auto samples_size = entry.num_bytes;
+                    if (entry.compressed_data_offs + size > actual_file_size)
+                        samples_size = actual_file_size - entry.compressed_data_offs;
+                    bdata.resize(size);
+                    stream.read((char*)bdata.data(), samples_size);
                     tracks.push_back(DecodeImaAdpcm(bdata, GetNumSamples(entry)));
                 }
                 // @todo: codecs 5 (BINK) and 4 remaining
@@ -223,9 +240,23 @@ public:
                 {
                     printf("Unsupported codec (%d)!\n", entry.codec);
                 }
-
                 entries.push_back(entry);
             }
+
+            size_t num_metadata = (header.entry_desc_offs - header.metadata_offs) / sizeof metadata_t;
+            stream.seekg(header.metadata_offs, std::ios::beg);
+            for (int index = 0; index < num_metadata; ++index) {
+                metadata_t tmp_metadata;
+                stream.read(reinterpret_cast<char*>(&tmp_metadata), sizeof metadata_t);
+                metadata.push_back(tmp_metadata);
+                printf("metadata #%d\tcodec = 0x%x\t", index+1, tmp_metadata.codec);
+                for (int i = 0; i < 6; ++i)
+                    printf("%f%s", tmp_metadata.unk_fvals[i], i != 5 ? ", " : "\n");
+            }
+            char desc[16] = { '\0' };
+            stream.read(reinterpret_cast<char*>(&desc), 16);
+            printf("Bank Type: %s\n", std::string(desc).c_str());
+
             stream.close();
         }
     }
