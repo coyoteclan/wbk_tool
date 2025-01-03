@@ -25,72 +25,52 @@ const int indexTable[16] = {
     -1, -1, -1, -1, 2, 4, 6, 8
 };
 
-std::vector<int16_t> DecodeImaAdpcm(const std::vector<uint8_t>& ImaFileData, int numSamples) {
-    int inp = 0;            // Input buffer pointer
-    std::vector<int16_t> outBuff(numSamples); // Output buffer
-    int outIndex = 0;       // Output buffer pointer
-    int sign;               // Current ADPCM sign bit
-    int delta;              // Current ADPCM output value
-    int step;               // Stepsize
-    int valpred;            // Predicted value
-    int vpdiff;             // Current change to valpred
-    int index;              // Current step change index
-    int inputbuffer = 0;    // Place to keep next 4-bit value
-    bool bufferstep = false; // Toggle between inputbuffer/input
-
+// taken from ALSA
+std::vector<int16_t> DecodeImaAdpcm(const std::vector<uint8_t>& samples, int num_samples)
+{
+    std::vector<int16_t> outBuff;
     ImaAdpcmState state;
-    valpred = state.valprev;
-    index = state.index;
-    step = stepsizeTable[index];
-
-    for (; numSamples > 0; numSamples--) {
-        // Step 1 - Get the delta value
-        if (bufferstep) {
-            delta = inputbuffer & 0xF;
+    
+    for (auto code : samples) {
+        short pred_diff;	/* Predicted difference to next sample */
+        short step;		/* holds previous StepSize value */
+        char sign;
+        /* Separate sign and magnitude */
+        sign = code & 0x8;
+        code &= 0x7;
+        /*
+         * Computes pred_diff = (code + 0.5) * step / 4,
+         * but see comment in adpcm_coder.
+         */
+        step = stepsizeTable[state.index];
+        /* Compute difference and new predicted value */
+        pred_diff = step >> 3;
+        for (int i = 0x4; i; i >>= 1, step >>= 1) {
+            if (code & i) {
+                pred_diff += step;
+            }
         }
-        else {
-            inputbuffer = ImaFileData[inp++];
-            delta = (inputbuffer >> 4) & 0xF;
+        state.valprev += (sign) ? -pred_diff : pred_diff;
+        /* Clamp output value */
+        if (state.valprev > 32767) {
+            state.valprev = 32767;
         }
-        bufferstep = !bufferstep;
-
-        // Step 2 - Find new index value (for later)
-        index += indexTable[delta];
-        index = std::clamp(index, 0, 88);
-
-        // Step 3 - Separate sign and magnitude
-        sign = delta & 8;
-        delta &= 7;
-
-        // Step 4 - Compute difference and new predicted value
-        vpdiff = step >> 3;
-        if (delta & 4) vpdiff += step;
-        if (delta & 2) vpdiff += step >> 1;
-        if (delta & 1) vpdiff += step >> 2;
-
-        if (sign) {
-            valpred -= vpdiff;
+        else if (state.valprev < -32768) {
+            state.valprev = -32768;
         }
-        else {
-            valpred += vpdiff;
+        /* Find new StepSize index value */
+        state.index += indexTable[code];
+        if (state.index < 0) {
+            state.index = 0;
         }
-
-        // Step 5 - Clamp output value
-        valpred = std::clamp(valpred, (int)INT16_MIN, (int)INT16_MAX);
-
-        // Step 6 - Update step value
-        step = stepsizeTable[index];
-
-        // Step 7 - Output value
-        outBuff[outIndex++] = static_cast<int16_t>(valpred);
+        else if (state.index > 88) {
+            state.index = 88;
+        }
+        int16_t val = static_cast<int16_t>(state.valprev);
+        outBuff.push_back(val);
     }
-
-    state.valprev = valpred;
-    state.index = index;
-
     return outBuff;
 }
-
 class WBK {
 public:
     struct header_t {
@@ -198,8 +178,6 @@ public:
                 else if (entry.codec == 7) {
                     bits_per_sample = 16;
                     blockAlign = (bits_per_sample * GetNumChannels(entry)) / 8;
-                    //auto avg_bytes_per_sec = wave.samples_per_second * (bits_per_sample * num_channels);
-                    //printf("avg_bytes_per_sec = %d\n", avg_bytes_per_sec);
                 }
 
                 // calc size depending on format
@@ -229,6 +207,7 @@ public:
                         tmp.push_back(sample1);
                         tmp.push_back(sample2);
                     }
+                    tracks.push_back(tmp);
                 }
                 // IMA ADPCM
                 else if (entry.codec == 7)
@@ -300,10 +279,10 @@ int main(int argc, char** argv)
     wbk.read(argv[1]);
     
     size_t index = 0;
-    for (auto& bank : wbk.tracks) {
+    for (auto& track : wbk.tracks) {
         WBK::nslWave& entry = wbk.entries[index];
         std::filesystem::path output_path = std::string(argv[2]).append(std::to_string(index+1)).append(".wav");
-        writeWAV(output_path.string(), bank, entry.samples_per_second, WBK::GetNumChannels(entry));
+        writeWAV(output_path.string(), track, entry.samples_per_second / WBK::GetNumChannels(entry), WBK::GetNumChannels(entry));
         ++index;
     }
     return 1;
