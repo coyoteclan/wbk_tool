@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <algorithm>
 
+namespace fs = std::filesystem;
+
 struct ImaAdpcmState {
     int valprev = 0;
     int index = 0;
@@ -71,6 +73,75 @@ std::vector<int16_t> DecodeImaAdpcm(const std::vector<uint8_t>& samples, int num
     }
     return outBuff;
 }
+
+
+struct WAV {
+    struct WAVHeader {
+        char riff[4] = { 'R', 'I', 'F', 'F' };
+        uint32_t chunkSize;
+        char wave[4] = { 'W', 'A', 'V', 'E' };
+        char fmt[4] = { 'f', 'm', 't', ' ' };
+        uint32_t subchunk1Size = 16;
+        uint16_t audioFormat = 1;
+        uint16_t numChannels = 1;
+        uint32_t sampleRate;
+        uint32_t byteRate;
+        uint16_t blockAlign;
+        uint16_t bitsPerSample = 16;
+        char data[4] = { 'd', 'a', 't', 'a' };
+        uint32_t subchunk2Size;
+    } header;
+
+    std::vector<uint8_t> samples;
+
+    bool readWAV(const fs::path& filename) {
+        std::ifstream inputFile(filename, std::ios::binary);
+        if (!inputFile.good()) {
+            return false;
+        }
+
+        samples.clear();
+        inputFile.read(reinterpret_cast<char*>(&header), sizeof(WAVHeader));
+        if (inputFile.gcount() != sizeof(WAVHeader)) {
+            printf("Failed to read WAV header.\n");
+            return false;
+        }
+        if (std::string(header.riff, 4) != "RIFF" || std::string(header.wave, 4) != "WAVE") {
+            printf("Invalid WAV file format.\n");
+            return false;
+        }
+        samples.resize(header.subchunk2Size);
+        inputFile.read(reinterpret_cast<char*>(samples.data()), header.subchunk2Size);
+        if (inputFile.gcount() != static_cast<std::streamsize>(header.subchunk2Size)) {
+            printf("Failed to read WAV sample data.\n");
+            return false;
+        }
+        return true;
+    }
+    static void writeWAV(const std::string& filename, const std::vector<int16_t>& samples, uint32_t sampleRate, int nchannels = 1) {
+        WAVHeader header;
+        header.sampleRate = sampleRate;
+        header.numChannels = nchannels;
+        header.bitsPerSample = 16;
+        header.blockAlign = header.numChannels * (header.bitsPerSample / 8);
+        header.byteRate = header.sampleRate * header.blockAlign;
+        header.subchunk2Size = samples.size() * sizeof(int16_t);
+        header.chunkSize = 36 + header.subchunk2Size;
+
+        std::ofstream outFile(filename, std::ios::binary);
+        if (!outFile)
+            printf("Failed to write to WAV file.\n");
+        else {
+            outFile.write(reinterpret_cast<const char*>(&header), sizeof(WAVHeader));
+            outFile.write(reinterpret_cast<const char*>(samples.data()), samples.size() * sizeof(int16_t));
+            outFile.close();
+            printf("Written to %s\n", filename.c_str());
+        }
+    }
+};
+
+
+
 class WBK {
 public:
     struct header_t {
@@ -130,7 +201,12 @@ public:
             num_channels = 1;
         return num_channels;
     }
-
+    static void SetNumChannels(nslWave& wave, int num_channels) {
+        unsigned char channel_mask = 0xFF, new_channel_bits = 0;
+        for (int i = 0; i < num_channels; ++i)
+            new_channel_bits |= (1 << i);
+        wave.flags = (wave.flags & ~channel_mask) | new_channel_bits;
+    }
     static int GetNumSamples(const nslWave& wave)
     {
         unsigned int tmp_flag = (unsigned __int8)((((wave.flags & 0x55) + ((wave.flags >> 1) & 0x55)) & 0x33)     +
@@ -155,18 +231,20 @@ public:
             return wave.num_samples;
     }
 
-    void read(std::string path)
+    void read(fs::path path)
     {
         std::ifstream stream(path, std::ios::binary);
         if (stream.good()) {
             stream.seekg(0, std::ios::end);
             size_t actual_file_size = stream.tellg();
             stream.seekg(0, std::ios::beg);
+            raw_data.resize(actual_file_size);
+            stream.read((char*)raw_data.data(), actual_file_size);
+
+            stream.seekg(0, std::ios::beg);
             stream.read(reinterpret_cast<char*>(&header), sizeof header_t);
-            printf("Bank Name: %s\n", std::string(header.name).c_str());
 
             // read all entries
-
             for (int index = 0; index < header.num_entries; ++index) {
                 nslWave entry;
                 stream.seekg(0x100 + (sizeof nslWave * index), std::ios::beg);
@@ -207,8 +285,11 @@ public:
                 else
                     size = 2 * entry.num_bytes;
 
-
-                printf("Hash: 0x%08X codec=%d num_samples=%d num_channels=%d rate=%dHz bps=%d length=%fs\n", entry.hash, entry.codec, GetNumSamples(entry), GetNumChannels(entry), entry.samples_per_second, bits_per_sample, (float)GetNumSamples(entry) / entry.samples_per_second);
+                printf("[%d] Hash: 0x%08X codec=%d num_samples=%d num_channels=%d rate=%dHz bps=%d length=%fs offs=0x%X\n",   index + 1, 
+                                                                                                                    entry.hash, entry.codec, 
+                                                                                                                    GetNumSamples(entry), GetNumChannels(entry), 
+                                                                                                                    entry.samples_per_second, bits_per_sample, 
+                                                                                                                    (float)GetNumSamples(entry) / entry.samples_per_second, entry.compressed_data_offs);
                 
                 // PCM(?)
                 if (entry.codec == 1 || entry.codec == 2) {
@@ -231,7 +312,7 @@ public:
                     auto samples_size = entry.num_bytes;
                     if (entry.compressed_data_offs + size > actual_file_size)
                         samples_size = actual_file_size - entry.compressed_data_offs;
-                    bdata.resize(size);
+                    bdata.resize(samples_size);
                     stream.read((char*)bdata.data(), samples_size);
                     tracks.push_back(DecodeImaAdpcm(bdata, GetNumSamples(entry)));
                 }
@@ -243,78 +324,124 @@ public:
                 entries.push_back(entry);
             }
 
+            // read metadata
             size_t num_metadata = (header.entry_desc_offs - header.metadata_offs) / sizeof metadata_t;
-            stream.seekg(header.metadata_offs, std::ios::beg);
-            for (int index = 0; index < num_metadata; ++index) {
-                metadata_t tmp_metadata;
-                stream.read(reinterpret_cast<char*>(&tmp_metadata), sizeof metadata_t);
-                metadata.push_back(tmp_metadata);
-                printf("metadata #%d\tcodec = 0x%x\t", index+1, tmp_metadata.codec);
-                for (int i = 0; i < 6; ++i)
-                    printf("%f%s", tmp_metadata.unk_fvals[i], i != 5 ? ", " : "\n");
+            if (num_metadata) {
+                stream.seekg(header.metadata_offs, std::ios::beg);
+                for (int index = 0; index < num_metadata; ++index) {
+                    metadata_t tmp_metadata;
+                    stream.read(reinterpret_cast<char*>(&tmp_metadata), sizeof metadata_t);
+                    if (tmp_metadata.codec != 0) {
+                        metadata.push_back(tmp_metadata);
+                        printf("metadata #%d\tcodec = %d\t", index + 1, tmp_metadata.codec);
+                        for (int i = 0; i < 6; ++i)
+                            printf("%f%s", tmp_metadata.unk_fvals[i], i != 5 ? ", " : "\n");
+                    }
+                }
             }
+
             char desc[16] = { '\0' };
             stream.read(reinterpret_cast<char*>(&desc), 16);
             printf("Bank Type: %s\n", std::string(desc).c_str());
-
             stream.close();
         }
     }
+
+    void write(fs::path path) {
+        std::ofstream ofs(path, std::ios::binary);
+        if (ofs.good()) {
+            ofs.write((char*)raw_data.data(), raw_data.size());
+            ofs.close();
+        }
+    }
+
+
+    bool replace(const WBK& wbk, int replacement_index, const WAV& wav)
+    {
+        if (replacement_index > header.num_entries)
+            return false;
+
+        auto replacement_data_offs = 0x100 + (sizeof nslWave * replacement_index);
+        nslWave& entry= *reinterpret_cast<nslWave*>(&raw_data.data()[replacement_data_offs]);
+        if (entry.codec == 7) {
+            auto size_difference = entry.num_bytes - wav.samples.size();
+            entry.num_bytes = wav.header.subchunk2Size;
+            entry.samples_per_second = wav.header.sampleRate;
+            wbk.SetNumChannels(entry, wav.header.numChannels);
+
+            // modify the samples at entry.compressed_data_offs
+
+
+            // fill in and move around the other data entries
+            if (replacement_index != header.num_entries)
+            {
+                for (int index = replacement_index + 1; index < header.num_entries; ++index) {
+                    nslWave& tmp_entry = *reinterpret_cast<nslWave*>(&raw_data.data()[0x100 + (sizeof nslWave * index)]);
+                    entry.compressed_data_offs += size_difference;
+                    entry.compressed_data_offs = (0x8000 - (entry.compressed_data_offs % 0x8000)) % 0x8000; // align
+                }
+
+            }
+            return true;
+        }
+        return false;
+    }
+
+
+private:
+        std::vector<uint8_t> raw_data;
 };
 
-static void writeWAV(const std::string& filename, const std::vector<int16_t>& samples, uint32_t sampleRate, int nchannels = 1) {
-    struct WAVHeader {
-        char riff[4] = { 'R', 'I', 'F', 'F' };
-        uint32_t chunkSize;
-        char wave[4] = { 'W', 'A', 'V', 'E' };
-        char fmt[4] = { 'f', 'm', 't', ' ' };
-        uint32_t subchunk1Size = 16;
-        uint16_t audioFormat = 1;
-        uint16_t numChannels = 1;
-        uint32_t sampleRate;
-        uint32_t byteRate;
-        uint16_t blockAlign;
-        uint16_t bitsPerSample = 16;
-        char data[4] = { 'd', 'a', 't', 'a' };
-        uint32_t subchunk2Size;
-    } header;
-    header.sampleRate = sampleRate;
-    header.numChannels = nchannels;
-    header.bitsPerSample = 16;
-    header.blockAlign = header.numChannels * (header.bitsPerSample / 8);
-    header.byteRate = header.sampleRate * header.blockAlign;
-    header.subchunk2Size = samples.size() * sizeof(int16_t);
-    header.chunkSize = 36 + header.subchunk2Size;
-
-    std::ofstream outFile(filename, std::ios::binary);
-    if (!outFile) {
-        std::cerr << "Failed to open file for writing: " << filename << std::endl;
-        return;
-    }
-    outFile.write(reinterpret_cast<const char*>(&header), sizeof(WAVHeader));
-    outFile.write(reinterpret_cast<const char*>(samples.data()), samples.size() * sizeof(int16_t));
-    outFile.close();
-
-    std::cout << "WAV file written: " << filename << std::endl;
-}
 
 int main(int argc, char** argv)
 {
     printf("WBK Tool - LemonHaze 2025\n");
-    if (argc != 3) {
-        printf("Usage: %s <.wbk> <.wav>\n", argv[0]);
+    if (argc < 4 || argc > 6) {
+        printf("Usage: %s -e|-r <.wbk> <.wav>\n", argv[0]);
+        return -1;
+    }
+    
+    bool extract = false;
+    int replace_idx = -1;
+    if (strstr(argv[1], "-e")) {
+        extract = true;
+    } else if (strstr(argv[1], "-r")) {
+        auto idx = atoi(argv[5]) + 1;
+        if (idx > INT_MIN && idx < INT_MAX)
+            replace_idx = idx;
+        else 
+            printf("Invalid replacement index specified!\n");
+    } else {
         return -1;
     }
 
     WBK wbk;
-    wbk.read(argv[1]);
+    wbk.read(argv[2]);
     
     size_t index = 0;
     for (auto& track : wbk.tracks) {
         WBK::nslWave& entry = wbk.entries[index];
-        std::filesystem::path output_path = std::string(argv[2]).append(std::to_string(index+1)).append(".wav");
-        writeWAV(output_path.string(), track, entry.samples_per_second / WBK::GetNumChannels(entry), WBK::GetNumChannels(entry));
+        fs::path output_path = std::string(argv[3]).append(std::to_string(index+1)).append(".wav");
+        if (extract)
+            WAV::writeWAV(output_path.string(), track, entry.samples_per_second / WBK::GetNumChannels(entry), WBK::GetNumChannels(entry));
         ++index;
+    }
+    if (extract)
+        return 1;
+
+    if (replace_idx > index || replace_idx > wbk.header.num_entries)
+        printf("Invalid replacement index specified!\n");
+    else
+    {
+        WAV replacement_wav;
+        if (replacement_wav.readWAV(argv[6])) {
+            if (wbk.replace(wbk, replace_idx, replacement_wav))
+            {
+                fs::path path = fs::path(std::string(argv[3])).replace_extension(".new.wbk").string();
+                wbk.write(path);
+                printf("Replaced index %d and written to %s\n", replace_idx, path.string().c_str());
+            }
+        }         
     }
     return 1;
 }
