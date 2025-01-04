@@ -132,6 +132,11 @@
   <ItemGroup>
     <ClCompile Include="wbk_tool.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ima_adpcm.h" />
+    <ClInclude Include="wav.h" />
+    <ClInclude Include="wbk.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
