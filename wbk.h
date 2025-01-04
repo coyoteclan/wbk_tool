@@ -256,7 +256,8 @@ public:
                         (next_entry.compressed_data_offs + 0x7FFF) & ~0x7FFF;
                 }
             }
-            header.total_bytes += new_size - old_size;
+            header_t& p_header = *reinterpret_cast<header_t*>(&raw_data.data()[0]);
+            p_header.total_bytes += new_size - old_size;
             return true;
         }
         return false;
