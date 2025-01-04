@@ -225,39 +225,43 @@ public:
 
     bool replace(const WBK& wbk, int replacement_index, const WAV& wav)
     {
-        if (replacement_index > header.num_entries)
+        if (replacement_index >= header.num_entries)
             return false;
 
         auto replacement_data_offs = 0x100 + (sizeof nslWave * replacement_index);
         nslWave& entry = *reinterpret_cast<nslWave*>(&raw_data.data()[replacement_data_offs]);
+
         if (entry.codec == 7) {
-            auto size_difference = entry.num_bytes - wav.samples.size();
-            entry.num_bytes = wav.header.subchunk2Size;
+            int old_size = entry.num_bytes;
+            int new_size = wav.header.subchunk2Size;
+
+            entry.num_bytes = new_size;
+            entry.num_samples = wav.samples.size() / wav.header.numChannels;
             entry.samples_per_second = wav.header.sampleRate;
             wbk.SetNumChannels(entry, wav.header.numChannels);
 
-            // modify the samples at entry.compressed_data_offs
+            size_t new_data_start = entry.compressed_data_offs;
+            raw_data.resize(raw_data.size() + (new_size - old_size));
+            std::copy_backward(raw_data.begin() + new_data_start + old_size,
+                raw_data.end() - (new_size - old_size),
+                raw_data.end());
+            std::copy(wav.samples.begin(), wav.samples.end(), raw_data.begin() + new_data_start);
 
-
-            // fill in and move around the other data entries
-            if (replacement_index != header.num_entries)
-            {
+            if (replacement_index < header.num_entries - 1) {
+                int size_difference = new_size - old_size;
                 for (int index = replacement_index + 1; index < header.num_entries; ++index) {
-                    nslWave& tmp_entry = *reinterpret_cast<nslWave*>(&raw_data.data()[0x100 + (sizeof nslWave * index)]);
-                    entry.compressed_data_offs += size_difference;
-                    entry.compressed_data_offs = (0x8000 - (entry.compressed_data_offs % 0x8000)) % 0x8000; // align
+                    auto& next_entry = *reinterpret_cast<nslWave*>(&raw_data.data()[0x100 + (sizeof nslWave * index)]);
+                    next_entry.compressed_data_offs += size_difference;
+                    next_entry.compressed_data_offs =
+                        (next_entry.compressed_data_offs + 0x7FFF) & ~0x7FFF;
                 }
-
             }
+            header.total_bytes += new_size - old_size;
             return true;
         }
         return false;
     }
 
-
 private:
     std::vector<uint8_t> raw_data;
 };
-
-
-
