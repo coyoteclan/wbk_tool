@@ -20,7 +20,66 @@ const int indexTable[16] = {
 };
 
 // taken from ALSA
-std::vector<int16_t> DecodeImaAdpcm(const std::vector<uint8_t>& samples, int num_samples)
+static std::vector<char> EncodeImaAdpcm(std::vector<uint8_t>& rawData)
+{
+    std::vector<char> outBuff;
+    ImaAdpcmState state;
+    for (int j = 0; j < rawData.size() / 2;++j) {
+        short sl = *reinterpret_cast<short*>(&rawData[j]);
+        short diff;		/* Difference between sl and predicted sample */
+        short pred_diff;	/* Predicted difference to next sample */
+        unsigned char sign;	/* sign of diff */
+        short step;		/* holds previous StepSize value */
+        unsigned char adjust_idx;	/* Index to IndexAdjust lookup table */
+        int i;
+        /* Compute difference to previous predicted value */
+        diff = sl - state.valprev;
+        sign = (diff < 0) ? 0x8 : 0x0;
+        if (sign) {
+            diff = -diff;
+        }
+        /*
+         * This code *approximately* computes:
+         *    adjust_idx = diff * 4 / step;
+         *    pred_diff = (adjust_idx + 0.5) * step / 4;
+         *
+         * But in shift step bits are dropped. The net result of this is
+         * that even if you have fast mul/div hardware you cannot put it to
+         * good use since the fix-up would be too expensive.
+         */
+        step = stepsizeTable[state.index];
+        /* Divide and clamp */
+        pred_diff = step >> 3;
+        for (adjust_idx = 0, i = 0x4; i; i >>= 1, step >>= 1) {
+            if (diff >= step) {
+                adjust_idx |= i;
+                diff -= step;
+                pred_diff += step;
+            }
+        }
+        /* Update and clamp previous predicted value */
+        state.valprev += sign ? -pred_diff : pred_diff;
+        if (state.valprev > 32767) {
+            state.valprev = 32767;
+        }
+        else if (state.valprev < -32768) {
+            state.valprev = -32768;
+        }
+        /* Update and clamp StepSize lookup table index */
+        state.index += indexTable[adjust_idx];
+        if (state.index < 0) {
+            state.index = 0;
+        }
+        else if (state.index > 88) {
+            state.index = 88;
+        }
+        int8_t b = sign | adjust_idx;
+        outBuff.push_back(b);
+    }
+    return outBuff;
+}
+
+std::vector<int16_t> DecodeImaAdpcm(const std::vector<uint8_t>& samples)
 {
     std::vector<int16_t> outBuff;
     ImaAdpcmState state;
