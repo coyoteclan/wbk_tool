@@ -22,10 +22,18 @@ const int indexTable[16] = {
 // taken from ALSA
 static std::vector<char> EncodeImaAdpcm(std::vector<uint8_t>& rawData)
 {
+    auto conv = [](const std::vector<uint8_t>& rawBytes) -> std::vector<int16_t> {
+        std::vector<int16_t> pcmSamples;
+        for (size_t i = 0; i < rawBytes.size(); i += 2) {
+            pcmSamples.push_back((int16_t)rawBytes[i] | (rawBytes[i + 1] << 8));
+        }
+        return pcmSamples;
+    };
+    std::vector<int16_t> samples = conv(rawData);
+
     std::vector<char> outBuff;
     ImaAdpcmState state;
-    for (int j = 0; j < rawData.size() / 2;++j) {
-        short sl = *reinterpret_cast<short*>(&rawData[j]);
+    for (auto sl : samples) {
         short diff;		/* Difference between sl and predicted sample */
         short pred_diff;	/* Predicted difference to next sample */
         unsigned char sign;	/* sign of diff */
