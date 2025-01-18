@@ -124,13 +124,13 @@ void WBK::read(std::filesystem::path path)
         stream.read((char*)raw_data.data(), actual_file_size);
 
         stream.seekg(0, std::ios::beg);
-        stream.read(reinterpret_cast<char*>(&header), sizeof header_t);
+        stream.read(reinterpret_cast<char*>(&header), sizeof(header_t));
 
         // read all entries
         for (int index = 0; index < header.num_entries; ++index) {
             nslWave entry;
-            stream.seekg(0x100 + (sizeof nslWave * index), std::ios::beg);
-            stream.read(reinterpret_cast<char*>(&entry), sizeof nslWave);
+            stream.seekg(0x100 + (sizeof(nslWave) * index), std::ios::beg);
+            stream.read(reinterpret_cast<char*>(&entry), sizeof(nslWave));
 
             // calc bits per sample & blockAlign
             int bits_per_sample = 0;
@@ -208,12 +208,12 @@ void WBK::read(std::filesystem::path path)
 
         // read metadata
         if (header.metadata_offs) {
-            size_t num_metadata = (header.entry_desc_offs - header.metadata_offs) / sizeof metadata_t;
+            size_t num_metadata = (header.entry_desc_offs - header.metadata_offs) / sizeof(metadata_t);
             if (num_metadata) {
                 stream.seekg(header.metadata_offs, std::ios::beg);
                 for (int index = 0; index < num_metadata; ++index) {
                     metadata_t tmp_metadata;
-                    stream.read(reinterpret_cast<char*>(&tmp_metadata), sizeof metadata_t);
+                    stream.read(reinterpret_cast<char*>(&tmp_metadata), sizeof (metadata_t));
                     if (tmp_metadata.codec != 0) {
                         metadata.push_back(tmp_metadata);
                         printf("metadata #%d\tcodec = %d\t", index + 1, tmp_metadata.codec);
